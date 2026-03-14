@@ -1,0 +1,116 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes #WTF
+
+  # PostgreSQL для хранения данных
+  postgres:
+    image: postgres:15-alpine
+    container_name: deribit_postgres
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-deribit_prices}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-deribit_prices}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Сервис инициализации БД (запускается один раз)
+  init-db:
+    build: .
+    container_name: init_db
+    command: python scripts/init_db.py
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - PYTHONPATH=/app
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+    volumes:
+      - .:/app
+    restart: "no"
+
+  # Celery Worker (выполняет задачи)
+  worker:
+    build: .
+    container_name: celery_worker
+    command: celery -A app.infrastructure.celery.config.celery_app worker --loglevel=info
+    depends_on:
+      - redis
+      - postgres
+      - init-db
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
+      - POSTGRES_DB=${POSTGRES_DB:-deribit_prices}
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  # Celery Beat (планировщик задач - запускает задачи по расписанию)
+  beat:
+    build: .
+    container_name: celery_beat
+    command: celery -A app.infrastructure.celery.config.celery_app beat --loglevel=info
+    depends_on:
+      - redis
+      - worker
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
+      - POSTGRES_DB=${POSTGRES_DB:-deribit_prices}
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  api:
+    build: .
+    container_name: deribit_api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    working_dir: /app
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+      - init-db
+    environment:
+      - PYTHONPATH=/app
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
+      - POSTGRES_DB=${POSTGRES_DB:-deribit_prices}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  postgres_data:

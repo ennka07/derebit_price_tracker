@@ -1,0 +1,5 @@
+/help
+/.idea
+.env
+*__pycache__*
+celerybeat-schedule
